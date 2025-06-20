@@ -659,7 +659,7 @@ class RwkvModel(RwkvPreTrainedModel):
         # this will create an overhead :/
         # We set requires_grad=False as we cannot compute gradients on top of 4bit parameters anyway and to avoid
         # bugs with bnb
-        quant_weight = bnb.nn.Params4bit(dequant_weights.to("cpu"), requires_grad=False).to(dequant_weights.device)
+        quant_weight = bnb.nn.Params4bit(dequant_weights.to("cpu"), requires_grad=False, quant_type="nf4").to(dequant_weights.device)
         setattr(target_layer, "weight", quant_weight)
 
 
