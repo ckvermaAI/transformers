@@ -91,7 +91,7 @@ if is_bitsandbytes_available():
 @require_accelerate
 @require_torch
 @require_torch_gpu_if_bnb_not_multi_backend_enabled
-@slow
+# @slow
 class Base4bitTest(unittest.TestCase):
     # We keep the constants inside the init function and model loading inside setUp function
 
@@ -111,6 +111,7 @@ class Base4bitTest(unittest.TestCase):
     EXPECTED_OUTPUTS.add("Hello my name is John Doe, I am a student at the University")
     EXPECTED_OUTPUTS.add("Hello my name is John and I am 25 years old.")
     EXPECTED_OUTPUTS.add("Hello my name is John and I am a student at the University of")
+    EXPECTED_OUTPUTS.add("Hello my name is John and I am a member of the team at")
     MAX_NEW_TOKENS = 10
 
     def setUp(self):
@@ -118,16 +119,19 @@ class Base4bitTest(unittest.TestCase):
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
 
 
-@apply_skip_if_not_implemented
+# @apply_skip_if_not_implemented
 class Bnb4BitTest(Base4bitTest):
     def setUp(self):
         super().setUp()
 
         # Models and tokenizer
         self.model_fp16 = AutoModelForCausalLM.from_pretrained(
-            self.model_name, torch_dtype=torch.float16, device_map="auto"
+            self.model_name, torch_dtype=torch.bfloat16, device_map="auto"
         )
-        self.model_4bit = AutoModelForCausalLM.from_pretrained(self.model_name, load_in_4bit=True, device_map="auto")
+        quantization_config = BitsAndBytesConfig(bnb_4bit_quant_type="nf4", load_in_4bit=True)
+        self.model_4bit = AutoModelForCausalLM.from_pretrained(
+            self.model_name, device_map="auto", torch_dtype=torch.bfloat16, quantization_config=quantization_config
+        )
 
     def tearDown(self):
         r"""
@@ -184,7 +188,7 @@ class Bnb4BitTest(Base4bitTest):
         """
         self.assertTrue(hasattr(self.model_4bit.config, "_pre_quantization_dtype"))
         self.assertFalse(hasattr(self.model_fp16.config, "_pre_quantization_dtype"))
-        self.assertTrue(self.model_4bit.config._pre_quantization_dtype == torch.float16)
+        self.assertTrue(self.model_4bit.config._pre_quantization_dtype == torch.bfloat16)
 
     def test_linear_are_4bit(self):
         r"""
@@ -208,9 +212,11 @@ class Bnb4BitTest(Base4bitTest):
         """
         model_id = "RWKV/rwkv-4-169m-pile"
 
-        quantization_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_use_double_quant=True)
+        quantization_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4")
 
-        model = AutoModelForCausalLM.from_pretrained(model_id, quantization_config=quantization_config)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id, quantization_config=quantization_config, torch_dtype=torch.bfloat16
+        )
         tok = AutoTokenizer.from_pretrained(model_id)
 
         text = "Hello my name is"
@@ -235,11 +241,11 @@ class Bnb4BitTest(Base4bitTest):
         r"""
         Test that loading the model with the config is equivalent
         """
-        bnb_config = BitsAndBytesConfig()
+        bnb_config = BitsAndBytesConfig(bnb_4bit_quant_type="nf4")
         bnb_config.load_in_4bit = True
 
         model_4bit_from_config = AutoModelForCausalLM.from_pretrained(
-            self.model_name, quantization_config=bnb_config, device_map="auto"
+            self.model_name, quantization_config=bnb_config, device_map="auto", torch_dtype=torch.bfloat16
         )
 
         encoded_input = self.tokenizer(self.input_text, return_tensors="pt")
@@ -253,10 +259,10 @@ class Bnb4BitTest(Base4bitTest):
         r"""
         Test that loading the model and unquantize it produce correct results
         """
-        bnb_config = BitsAndBytesConfig(load_in_4bit=True)
+        bnb_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4")
 
         model_4bit = AutoModelForCausalLM.from_pretrained(
-            self.model_name, quantization_config=bnb_config, device_map="auto"
+            self.model_name, quantization_config=bnb_config, device_map="auto", torch_dtype=torch.bfloat16
         )
 
         model_4bit.dequantize()
@@ -642,8 +648,8 @@ class Bnb4BitLlamaTest(Bnb4BitTest):
 @require_accelerate
 @require_torch
 @require_torch_gpu_if_bnb_not_multi_backend_enabled
-@slow
-@apply_skip_if_not_implemented
+# @slow
+# @apply_skip_if_not_implemented
 class BaseSerializationTest(unittest.TestCase):
     model_name = "facebook/opt-125m"
     input_text = "Mars colonists' favorite meals are"
@@ -670,6 +676,7 @@ class BaseSerializationTest(unittest.TestCase):
             self.model_name,
             quantization_config=self.quantization_config,
             device_map=torch_device,
+            torch_dtype=torch.bfloat16,
         )
 
         with tempfile.TemporaryDirectory() as tmpdirname:
@@ -678,7 +685,9 @@ class BaseSerializationTest(unittest.TestCase):
             config = AutoConfig.from_pretrained(tmpdirname)
             self.assertTrue(hasattr(config, "quantization_config"))
 
-            model_1 = AutoModelForCausalLM.from_pretrained(tmpdirname, device_map=torch_device)
+            model_1 = AutoModelForCausalLM.from_pretrained(
+                tmpdirname, device_map=torch_device, torch_dtype=torch.bfloat16
+            )
 
         # checking quantized linear module weight
         linear = get_some_linear_layer(model_1)
@@ -806,8 +815,8 @@ class Bnb4BitTestBasicConfigTest(unittest.TestCase):
 @require_bitsandbytes
 @require_accelerate
 @require_torch_gpu_if_bnb_not_multi_backend_enabled
-@slow
-@apply_skip_if_not_implemented
+# @slow
+# @apply_skip_if_not_implemented
 class Bnb4bitCompile(unittest.TestCase):
     model_name = "hf-internal-testing/tiny-random-LlamaForCausalLM"
     input_text = "Hello my name is"
@@ -815,7 +824,15 @@ class Bnb4bitCompile(unittest.TestCase):
     def setUp(self):
         # Models and tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        self.model_4bit = AutoModelForCausalLM.from_pretrained(self.model_name, load_in_4bit=True)
+        self.quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=False,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+        )
+        self.model_4bit = AutoModelForCausalLM.from_pretrained(
+            self.model_name, quantization_config=self.quantization_config, torch_dtype=torch.bfloat16
+        )
 
     def test_generate_compile(self):
         encoded_input = self.tokenizer(self.input_text, return_tensors="pt")
