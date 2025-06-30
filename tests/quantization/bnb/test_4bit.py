@@ -17,6 +17,7 @@ import tempfile
 import unittest
 
 from packaging import version
+from parameterized import parameterized
 
 from transformers import (
     AutoConfig,
@@ -111,6 +112,7 @@ class Base4bitTest(unittest.TestCase):
     EXPECTED_OUTPUTS.add("Hello my name is John Doe, I am a student at the University")
     EXPECTED_OUTPUTS.add("Hello my name is John and I am 25 years old.")
     EXPECTED_OUTPUTS.add("Hello my name is John and I am a student at the University of")
+    EXPECTED_OUTPUTS.add("Hello my name is John and I am a member of the team at")
     MAX_NEW_TOKENS = 10
 
     def setUp(self):
@@ -124,7 +126,7 @@ class Bnb4BitTest(Base4bitTest):
         super().setUp()
 
         # Models and tokenizer
-        self.model_fp16 = AutoModelForCausalLM.from_pretrained(
+        self.model_16bit = AutoModelForCausalLM.from_pretrained(
             self.model_name, torch_dtype=torch.float16, device_map="auto"
         )
         self.model_4bit = AutoModelForCausalLM.from_pretrained(self.model_name, load_in_4bit=True, device_map="auto")
@@ -134,7 +136,7 @@ class Bnb4BitTest(Base4bitTest):
         TearDown function needs to be called at the end of each test to free the GPU memory and cache, also to
         avoid unexpected behaviors. Please see: https://discuss.pytorch.org/t/how-can-we-release-gpu-memory-cache/14530/27
         """
-        del self.model_fp16
+        del self.model_16bit
         del self.model_4bit
 
         gc.collect()
@@ -147,7 +149,7 @@ class Bnb4BitTest(Base4bitTest):
         See: https://github.com/huggingface/transformers/issues/25978
         """
         num_params_4bit = self.model_4bit.num_parameters()
-        num_params_fp16 = self.model_fp16.num_parameters()
+        num_params_fp16 = self.model_16bit.num_parameters()
 
         self.assertEqual(num_params_4bit, num_params_fp16)
 
@@ -171,7 +173,7 @@ class Bnb4BitTest(Base4bitTest):
         """
         from bitsandbytes.nn import Params4bit
 
-        mem_fp16 = self.model_fp16.get_memory_footprint()
+        mem_fp16 = self.model_16bit.get_memory_footprint()
         mem_4bit = self.model_4bit.get_memory_footprint()
 
         self.assertAlmostEqual(mem_fp16 / mem_4bit, self.EXPECTED_RELATIVE_DIFFERENCE, delta=1e-5)
@@ -183,7 +185,7 @@ class Bnb4BitTest(Base4bitTest):
         A simple test to check if the model successfully stores the original dtype
         """
         self.assertTrue(hasattr(self.model_4bit.config, "_pre_quantization_dtype"))
-        self.assertFalse(hasattr(self.model_fp16.config, "_pre_quantization_dtype"))
+        self.assertFalse(hasattr(self.model_16bit.config, "_pre_quantization_dtype"))
         self.assertTrue(self.model_4bit.config._pre_quantization_dtype == torch.float16)
 
     def test_linear_are_4bit(self):
@@ -193,7 +195,7 @@ class Bnb4BitTest(Base4bitTest):
         """
         from transformers import T5PreTrainedModel
 
-        self.model_fp16.get_memory_footprint()
+        self.model_16bit.get_memory_footprint()
         self.model_4bit.get_memory_footprint()
 
         for name, module in self.model_4bit.named_modules():
@@ -231,15 +233,25 @@ class Bnb4BitTest(Base4bitTest):
 
         self.assertIn(self.tokenizer.decode(output_sequences[0], skip_special_tokens=True), self.EXPECTED_OUTPUTS)
 
-    def test_generate_quality_config(self):
+    @parameterized.expand(
+        [
+            ("fp16-fp4", torch.float16, "fp4"),
+            ("bf16-fp4", torch.bfloat16, "fp4"),
+            ("fp16-nf4", torch.float16, "nf4"),
+            ("bf16-nf4", torch.bfloat16, "nf4"),
+        ]
+    )
+    def test_generate_quality_config(self, name, dtype, quant_type):
         r"""
         Test that loading the model with the config is equivalent
         """
-        bnb_config = BitsAndBytesConfig()
-        bnb_config.load_in_4bit = True
+        if torch.hpu.is_available() and (dtype == torch.float16 or quant_type == "fp4"):
+            self.skipTest(reason="This configuration is not supported on HPU")
+
+        bnb_config = BitsAndBytesConfig(bnb_4bit_quant_type=quant_type, load_in_4bit=True)
 
         model_4bit_from_config = AutoModelForCausalLM.from_pretrained(
-            self.model_name, quantization_config=bnb_config, device_map="auto"
+            self.model_name, quantization_config=bnb_config, device_map="auto", torch_dtype=dtype
         )
 
         encoded_input = self.tokenizer(self.input_text, return_tensors="pt")
@@ -249,14 +261,25 @@ class Bnb4BitTest(Base4bitTest):
 
         self.assertIn(self.tokenizer.decode(output_sequences[0], skip_special_tokens=True), self.EXPECTED_OUTPUTS)
 
-    def test_generate_quality_dequantize(self):
+    @parameterized.expand(
+        [
+            ("fp16-fp4", torch.float16, "fp4"),
+            ("bf16-fp4", torch.bfloat16, "fp4"),
+            ("fp16-nf4", torch.float16, "nf4"),
+            ("bf16-nf4", torch.bfloat16, "nf4"),
+        ]
+    )
+    def test_generate_quality_dequantize(self, name, dtype, quant_type):
         r"""
         Test that loading the model and unquantize it produce correct results
         """
-        bnb_config = BitsAndBytesConfig(load_in_4bit=True)
+        if torch.hpu.is_available() and (dtype == torch.float16 or quant_type == "fp4"):
+            self.skipTest(reason="This configuration is not supported on HPU")
+
+        bnb_config = BitsAndBytesConfig(bnb_4bit_quant_type=quant_type, load_in_4bit=True)
 
         model_4bit = AutoModelForCausalLM.from_pretrained(
-            self.model_name, quantization_config=bnb_config, device_map="auto"
+            self.model_name, quantization_config=bnb_config, device_map="auto", torch_dtype=dtype
         )
 
         model_4bit.dequantize()
@@ -324,23 +347,23 @@ class Bnb4BitTest(Base4bitTest):
 
         encoded_input = self.tokenizer(self.input_text, return_tensors="pt")
 
-        self.model_fp16 = self.model_fp16.to(torch.float32)
-        _ = self.model_fp16.generate(
-            input_ids=encoded_input["input_ids"].to(self.model_fp16.device), max_new_tokens=10
+        self.model_16bit = self.model_16bit.to(torch.float32)
+        _ = self.model_16bit.generate(
+            input_ids=encoded_input["input_ids"].to(self.model_16bit.device), max_new_tokens=10
         )
 
         if torch_device in ["cuda", "xpu"]:
             # Check that this does not throw an error
-            _ = self.model_fp16.to(torch_device)
+            _ = self.model_16bit.to(torch_device)
 
         # Check this does not throw an error
-        _ = self.model_fp16.to("cpu")
+        _ = self.model_16bit.to("cpu")
 
         # Check this does not throw an error
-        _ = self.model_fp16.half()
+        _ = self.model_16bit.half()
 
         # Check this does not throw an error
-        _ = self.model_fp16.float()
+        _ = self.model_16bit.float()
 
     def test_fp32_4bit_conversion(self):
         r"""
@@ -652,11 +675,13 @@ class BaseSerializationTest(unittest.TestCase):
         gc.collect()
         backend_empty_cache(torch_device)
 
-    def test_serialization(self, quant_type="nf4", double_quant=True, safe_serialization=True):
+    def test_serialization(self, quant_type="nf4", double_quant=True, safe_serialization=True, dtype=torch.float16):
         r"""
         Test whether it is possible to serialize a model in 4-bit. Uses most typical params as default.
         See ExtendedSerializationTest class for more params combinations.
         """
+        if torch.hpu.is_available() and (dtype == torch.float16 or quant_type == "fp4"):
+            self.skipTest(reason="This configuration is not supported on HPU")
 
         tokenizer = AutoTokenizer.from_pretrained(self.model_name)
 
@@ -664,12 +689,10 @@ class BaseSerializationTest(unittest.TestCase):
             load_in_4bit=True,
             bnb_4bit_quant_type=quant_type,
             bnb_4bit_use_double_quant=double_quant,
-            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_compute_dtype=dtype,
         )
         model_0 = AutoModelForCausalLM.from_pretrained(
-            self.model_name,
-            quantization_config=self.quantization_config,
-            device_map=torch_device,
+            self.model_name, quantization_config=self.quantization_config, device_map=torch_device, torch_dtype=dtype
         )
 
         with tempfile.TemporaryDirectory() as tmpdirname:
@@ -678,7 +701,7 @@ class BaseSerializationTest(unittest.TestCase):
             config = AutoConfig.from_pretrained(tmpdirname)
             self.assertTrue(hasattr(config, "quantization_config"))
 
-            model_1 = AutoModelForCausalLM.from_pretrained(tmpdirname, device_map=torch_device)
+            model_1 = AutoModelForCausalLM.from_pretrained(tmpdirname, device_map=torch_device, torch_dtype=dtype)
 
         # checking quantized linear module weight
         linear = get_some_linear_layer(model_1)
@@ -742,11 +765,20 @@ class ExtendedSerializationTest(BaseSerializationTest):
     def test_nf4_single_unsafe(self):
         self.test_serialization(quant_type="nf4", double_quant=False, safe_serialization=False)
 
+    def test_nf4_single_unsafe_bf16(self):
+        self.test_serialization(quant_type="nf4", double_quant=False, safe_serialization=False, dtype=torch.bfloat16)
+
     def test_nf4_single_safe(self):
         self.test_serialization(quant_type="nf4", double_quant=False, safe_serialization=True)
 
+    def test_nf4_single_safe_bf16(self):
+        self.test_serialization(quant_type="nf4", double_quant=False, safe_serialization=True, dtype=torch.bfloat16)
+
     def test_nf4_double_unsafe(self):
         self.test_serialization(quant_type="nf4", double_quant=True, safe_serialization=False)
+
+    def test_nf4_double_unsafe_bf16(self):
+        self.test_serialization(quant_type="nf4", double_quant=True, safe_serialization=False, dtype=torch.bfloat16)
 
     # nf4 double safetensors quantization is tested in test_serialization() method from the parent class
 
@@ -812,14 +844,33 @@ class Bnb4bitCompile(unittest.TestCase):
     model_name = "hf-internal-testing/tiny-random-LlamaForCausalLM"
     input_text = "Hello my name is"
 
-    def setUp(self):
+    def setUp(self, bnb_config=BitsAndBytesConfig()):
         # Models and tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        self.model_4bit = AutoModelForCausalLM.from_pretrained(self.model_name, load_in_4bit=True)
+        self.model_4bit = AutoModelForCausalLM.from_pretrained(
+            self.model_name, quantization_config=bnb_config, torch_dtype=bnb_config.bnb_4bit_compute_dtype
+        )
 
-    def test_generate_compile(self):
+    @parameterized.expand(
+        [
+            ("fp16-fp4", torch.float16, "fp4"),
+            ("bf16-fp4", torch.bfloat16, "fp4"),
+            ("fp16-nf4", torch.float16, "nf4"),
+            ("bf16-nf4", torch.bfloat16, "nf4"),
+        ]
+    )
+    def test_generate_compile(self, name, dtype, quant_type):
+        if torch.hpu.is_available() and (dtype == torch.float16 or quant_type == "fp4"):
+            self.skipTest(reason="This configuration is not supported on HPU")
+
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type=quant_type,
+            bnb_4bit_compute_dtype=dtype,
+        )
+        self.setUp(bnb_config)
+
         encoded_input = self.tokenizer(self.input_text, return_tensors="pt")
-
         # if nothing is set, compile will be disabled for bnb
         self.model_4bit.generate(
             input_ids=encoded_input["input_ids"].to(self.model_4bit.device),
